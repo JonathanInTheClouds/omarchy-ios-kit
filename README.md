@@ -72,9 +72,9 @@ Other versions may well work; these are the ones every step here ran on.
   tested with: installs stay valid for about a year and you can use App Store
   Connect API keys and TestFlight. xtool also accepts a free Apple ID (7-day
   installs, fewer features); that path isn't tested here.
-- **The Xcode `.xip`** matching your Swift version (see 3.1), downloaded from
-  [developer.apple.com/download/all](https://developer.apple.com/download/all)
-  (about 2 GB). Only the SDK is taken out of it; Xcode never runs.
+- **The Xcode `.xip`** matching your Swift version, downloaded from Apple with
+  any (free) Apple ID: see [3.4](#34-download-xcode-the-sdk-comes-from-it).
+  Only the SDK is taken out of it; Xcode never runs.
 - **Disk space:** about 10 GB for the toolchain and SDK, plus about 6 GB per
   iOS version you debug on (debug symbols, made automatically on the first
   debug run).
@@ -118,9 +118,39 @@ sudo sed -i '/^HoldPkg/a IgnorePkg   = swift-bin' /etc/pacman.conf
 (The kit's `install.sh` offers this too. `ios-toolchain-upgrade` does the
 upgrade properly when you choose to; see 10.1.)
 
-### 3.4 Run the installer
+### 3.4 Download Xcode (the SDK comes from it)
 
-Download the matching Xcode `.xip` first, then:
+Apple ships the iOS SDK only inside Xcode, so you need one download of
+Apple's `Xcode_<version>.xip`. Nothing is installed or run from it: the
+installer just takes the SDK out. You don't need a Mac.
+
+1. **Open** <https://developer.apple.com/download/all/?q=Xcode> in a browser
+   and **sign in with any Apple ID**. A free one is enough for this
+   download; accept the developer agreement if Apple asks.
+2. **Pick the Xcode that matches your Swift** (3.1). Swift 6.4 needs
+   **Xcode 27**: take the release entry named "Xcode 27" (not a beta or
+   release candidate unless your Swift needs it). Ignore "Command Line Tools",
+   "Additional Tools" and simulator runtimes.
+3. **Click the `.xip` file** in that entry. Xcode 27's is about 2 GB; older
+   versions are bigger. Save it, for example as `~/Downloads/Xcode_27.xip`.
+   **Don't unpack it**; the installer reads the `.xip` directly.
+4. **Check the size.** Apple's downloads need your browser's sign-in, so
+   `wget`/`curl` on the link without it saves a small HTML page instead of the
+   real file. If the file is only a few KB, download it from the browser.
+
+Not sure which version? Run omarchy-apple-dev's installer once without
+`XCODE_XIP`: it stops at the SDK step and prints the exact Xcode name and
+link. If you already have a Mac with a matching Xcode, omarchy-apple-dev can
+also stream just the SDK pieces from it ("Route B" in its
+`install-toolchain.sh`).
+
+Keep the `.xip` afterwards (anywhere, even an external drive): reinstalling
+or repairing the SDK later doesn't need it (the SDK is cached), but a fresh
+machine or a broken cache does.
+
+### 3.5 Run the installer
+
+With the `.xip` downloaded (3.4):
 
 ```sh
 cd ~/Tools/omarchy-apple-dev
@@ -136,7 +166,7 @@ PATH="/usr/bin:$PATH" XCODE_XIP=~/Downloads/Xcode_27.xip ./install-toolchain.sh 
   (or `ios-toolchain-upgrade --patch`) applies those three patches with sudo.
   Without them, apps with `.strings` files fail to build.
 
-### 3.5 Sign in to Apple
+### 3.6 Sign in to Apple
 
 ```sh
 xtool auth
@@ -155,7 +185,7 @@ chmod 700 ~/.config/xtool ~/.config/xtool/data
 chmod 600 ~/.config/xtool/data/*
 ```
 
-### 3.6 Connect the phone
+### 3.7 Connect the phone
 
 1. Plug the iPhone in, unlock it, tap **Trust** and enter the passcode.
 2. Check it's seen: `~/pymobile3-venv/bin/pymobiledevice3 usbmux list`.
@@ -190,7 +220,7 @@ The installer:
    - holding swift-bin (3.3);
    - making `usbmuxd` restart by itself after crashes (it can abort around
      debug sessions);
-   - the `.xcspec` patches (3.4);
+   - the `.xcspec` patches (3.5);
    - VS Code shortcuts (F6 run, Ctrl+Alt+D debug), merged into your
      keybindings with a backup;
    - Omarchy keys SUPER+R / SUPER+SHIFT+R (appended as a marked block to
@@ -282,7 +312,7 @@ The run keys use it automatically in apps set up for it (all apps made by
 
 Each swap is a small library that iOS only loads if it's signed by your
 development certificate, the one xtool already signs your apps with. After
-you've signed in (3.5) and installed one app, run **yourself**:
+you've signed in (3.6) and installed one app, run **yourself**:
 
 ```sh
 ~/.local/share/ios-run/hot-reload/extract-dev-identity.py
@@ -437,7 +467,7 @@ is safe.
 | Hot reload: `SWAP REFUSED` / `needs a normal run` | Expected for changes that can't be swapped safely (7.3); live mode reruns the app. |
 | Hot reload: `no development identity` | Run `extract-dev-identity.py` (7.1). |
 | Each save swaps twice | Two live sessions for one app; the newest now stops the older one (update the kit). |
-| The Python environment broke after a mise/asdf update | It was built on a version-managed Python: rerun the installer with `PATH="/usr/bin:$PATH"` (3.4). |
+| The Python environment broke after a mise/asdf update | It was built on a version-managed Python: rerun the installer with `PATH="/usr/bin:$PATH"` (3.5). |
 
 More, with root causes: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#traps-and-their-causes).
 
