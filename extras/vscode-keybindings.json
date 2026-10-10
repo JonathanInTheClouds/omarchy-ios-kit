@@ -1,0 +1,50 @@
+// Merged into ~/.config/Code/User/keybindings.json by install.sh (or by hand:
+// copy the entries into the [ ... ] list there).
+// iOS apps made by new-ios-app have "iosRun.project": true in their
+// .vscode/settings.json; these keys only act there.
+[
+    // F6 runs the app on the iPhone (like Ctrl+Shift+B). Elsewhere F6 keeps
+    // its usual job (move focus between panels).
+    {
+        "key": "f6",
+        "command": "workbench.action.tasks.runTask",
+        "args": "Run on iPhone",
+        "when": "config.iosRun.project"
+    },
+    // Ctrl+Alt+D does what F5 does, for keyboards without handy F-keys:
+    // start debugging, or continue when stopped at a breakpoint.
+    {
+        "key": "ctrl+alt+d",
+        "command": "workbench.action.debug.start",
+        "when": "debuggersAvailable && !inDebugMode"
+    },
+    {
+        "key": "ctrl+alt+d",
+        "command": "workbench.action.debug.continue",
+        "when": "inDebugMode && debugState == 'stopped'"
+    },
+    // The optional Omarchy keys (extras/hyprland-ios-keys.lua) send
+    // Ctrl+Alt+Shift+R for SUPER+R and Ctrl+Alt+Shift+D for SUPER+SHIFT+R.
+    // iOS projects: run / debug on the iPhone. Elsewhere SUPER+R opens recent.
+    {
+        "key": "ctrl+alt+shift+r",
+        "command": "workbench.action.tasks.runTask",
+        "args": "Run on iPhone",
+        "when": "config.iosRun.project"
+    },
+    {
+        "key": "ctrl+alt+shift+r",
+        "command": "workbench.action.openRecent",
+        "when": "!config.iosRun.project"
+    },
+    {
+        "key": "ctrl+alt+shift+d",
+        "command": "workbench.action.debug.start",
+        "when": "config.iosRun.project && !inDebugMode"
+    },
+    {
+        "key": "ctrl+alt+shift+d",
+        "command": "workbench.action.debug.continue",
+        "when": "config.iosRun.project && inDebugMode && debugState == 'stopped'"
+    }
+]

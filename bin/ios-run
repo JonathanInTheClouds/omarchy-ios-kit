@@ -1,0 +1,456 @@
+#!/usr/bin/env bash
+# Run the xtool project in the current folder on the iPhone, through
+# omarchy-apple-dev's device-run.sh. Two names, one script:
+#
+#   ios-run                            normal run: close the app, install the
+#                                      new build, open it, show its print()s
+#   ios-run-dev                        debug run: same, with lldb attached;
+#                                      the app starts right away
+#   ios-run-dev -b ContentView.swift:9 debug run that stops at that line
+#                                      (repeat -b; a function name works too)
+#   ios-run-dev --pause                debug run that waits at launch for `c`
+#   ios-run-dev --attach               attach lldb to the running app, no install
+#                                      (and no print() output)
+#   ios-run --live                     normal run, then every saved .swift file
+#                                      swaps into the running app (hot reload;
+#                                      needs the HotReload package, see docs)
+#   ios-run --auto-live                --live in apps set up for it, else a
+#                                      normal run (what SUPER+R/F6 use)
+#
+# The app's print() output shows up as "[app] ..." lines. In ios-run, Ctrl+C
+# stops watching it. In lldb: Ctrl+C pauses the app, Ctrl+D leaves lldb (the
+# app keeps running), then Enter builds and runs again with the same options.
+#
+# VS Code's F5 uses ios-run-dev --serve (get the app ready for its debugger)
+# and --stop (end that), from the project's .vscode/launch.json and tasks.json.
+#
+# Closing and opening the app need the developer disk image. An ios-run-dev
+# run mounts it, and it stays mounted until the phone restarts.
+set -euo pipefail
+
+# Settings written by the kit's install.sh (~/.config/ios-run/config).
+IOS_RUN_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/ios-run/config"
+# shellcheck source=/dev/null
+[ -f "$IOS_RUN_CONFIG" ] && . "$IOS_RUN_CONFIG"
+REPO="${APPLE_DEV_REPO:-$HOME/Tools/omarchy-apple-dev}"
+# IOS_RUN_PMD3: set by the hook below, so it still finds the venv under sudo.
+PMD3="${IOS_RUN_PMD3:-$HOME/pymobile3-venv/bin/pymobiledevice3}"
+
+# The app's output as `dvt launch --stream` relays it: drop the colours and the
+# log prefix ("<time> <host> PID:<n>[<pid>] INFO ").
+app_output() {
+  sed -u -E 's/\x1b\[[0-9;]*m//g; s/^.* PID:[0-9]+\[[0-9]+\] [A-Z]+ /[app] /'
+}
+
+# Stand-in for pymobiledevice3 inside device-run.sh during debug runs. Its
+# suspended launch gets --stream, which keeps running in the background and
+# writes the app's output to the terminal (fd 9) while lldb runs. device-run.sh
+# reads the pid from our stdout, so only that line goes there. Everything else
+# goes straight to pymobiledevice3.
+if [ "${1:-}" = --pmd3-hook ]; then
+  shift
+  if [[ " $* " != *" dvt launch "* || " $* " != *" --suspended "* ]]; then
+    exec "$PMD3" "$@"
+  fi
+  pidf=$(mktemp)
+  PYTHONUNBUFFERED=1 "$PMD3" "$@" --env NSUnbufferedIO=YES --stream \
+    > >(exec >&9; awk -v f="$pidf" '
+          /^Process launched with pid [0-9]+$/ { print $5 > f; close(f); next }
+          { print; fflush() }' | app_output | tee -a "${IOS_RUN_APP_LOG:-/dev/null}") 2>&1 &
+  bg=$!
+  echo "$bg" >>"$IOS_RUN_STREAMS"
+  for _ in $(seq 300); do
+    [ -s "$pidf" ] && break
+    kill -0 "$bg" 2>/dev/null || break
+    sleep 0.1
+  done
+  [ -s "$pidf" ] || { rm -f "$pidf"; exit 1; }
+  echo "Process launched with pid $(cat "$pidf")"
+  rm -f "$pidf"
+  exit 0
+fi
+
+# Stand-in for lldb inside device-run.sh during --serve. By then the app is
+# installed, launched paused and reachable through device-run.sh's debugserver
+# forwarder. Turn lldb's setup commands (the -o arguments) into the Python file
+# VS Code's attachCommands run, then hold everything open until --stop or Ctrl+C.
+if [ "${1:-}" = --lldb-serve ]; then
+  shift
+  ocmds=()
+  while [ $# -gt 0 ]; do
+    if [ "$1" = -o ]; then ocmds+=("$2"); shift 2; else shift; fi
+  done
+  # Python rather than a file for `command source`: that starts lldb's own
+  # event-handler thread, which then takes the stop events lldb-dap waits for,
+  # so breakpoints would hit without VS Code ever showing it.
+  /usr/bin/python3 - "$IOS_RUN_SERVE_CMDS" "$IOS_RUN_APP_LOG" "${ocmds[@]}" <<'PY'
+import json, sys
+out, app_log, cmds = sys.argv[1], sys.argv[2], sys.argv[3:]
+open(out, "w").write(f'''# Written by ios-run-dev --serve; VS Code's launch.json runs it to attach.
+import lldb
+ci = lldb.debugger.GetCommandInterpreter()
+for c in {json.dumps(cmds, indent=1)}:
+    if c.startswith("script "):
+        lldb.target = lldb.debugger.GetSelectedTarget()
+        exec(c[len("script "):], {{"lldb": lldb}})
+        continue
+    r = lldb.SBCommandReturnObject()
+    ci.HandleCommand(c, r)
+    print((r.GetOutput() or "") + (r.GetError() or ""), end="")
+    if not r.Succeeded():
+        raise RuntimeError(c)
+
+# The app's print()s, for the Debug Console: --serve also writes them to this
+# file. lldb-dap shows whatever is written to lldb's output as console text.
+import threading, time
+def relay(path, out):
+    with open(path, errors="replace") as f:
+        while True:
+            line = f.readline()
+            if not line:
+                time.sleep(0.1)
+                continue
+            if line.startswith("[app] "):
+                line = line[len("[app] "):]
+            out.Write(line.encode())
+            out.Flush()
+threading.Thread(target=relay, args=({json.dumps(app_log)}, lldb.debugger.GetOutputFile()), daemon=True).start()
+''')
+PY
+  echo $$ >"$IOS_RUN_SERVE_PID"
+  sleep infinity &
+  trap 'kill $! 2>/dev/null; rm -f "$IOS_RUN_SERVE_PID"; exit 0' TERM INT HUP
+  echo "== Ready for the debugger"
+  wait
+fi
+
+case "${1:-}" in -h | --help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+
+if [ ! -f xtool.yml ]; then
+  echo "No xtool.yml here. Run $(basename "$0") from your app's folder." >&2
+  exit 1
+fi
+
+# VS Code's F5 (see .vscode/launch.json): --serve gets the app ready and waits;
+# the debugger then attaches with xtool/ios-debug.py; --stop ends the --serve.
+serve_cmds="$PWD/xtool/ios-debug.py" serve_pid="$PWD/xtool/ios-debug.pid"
+serve_log="$PWD/xtool/ios-app-output.log"
+if [ "${1:-}" = --stop ]; then
+  if [ -f "$serve_pid" ] && kill "$(cat "$serve_pid")" 2>/dev/null; then
+    echo "== Stopped the debug run"
+  fi
+  rm -f "$serve_pid"
+  exit 0
+fi
+
+# ios-run's own options; device-run.sh rejects arguments it doesn't know.
+orig_args=("$@")
+pause=0 debug=0 serve=0 live=0 breaks=() pass=()
+# Called as ios-run-dev (a symlink to this script): always a debug run.
+[ "$(basename "$0")" = ios-run-dev ] && debug=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -b | --break) breaks+=("${2:?-b needs FILE:LINE or a function name}"); shift 2 ;;
+    --pause) pause=1; shift ;;
+    --serve) serve=1 debug=1; shift ;;
+    --live) live=1; shift ;;
+    --auto-live) live=2; shift ;;
+    --lldb | --attach) debug=1; pass+=("$1"); shift ;;
+    *) pass+=("$1"); shift ;;
+  esac
+done
+# -b and --pause only make sense in a debug run. device-run.sh needs --lldb
+# unless --attach (which implies it) was given.
+{ [ "${#breaks[@]}" -gt 0 ] || [ "$pause" = 1 ]; } && debug=1
+if [ "$debug" = 1 ] && [[ " ${pass[*]-} " != *" --lldb "* && " ${pass[*]-} " != *" --attach "* ]]; then
+  pass+=(--lldb)
+fi
+
+# Debug runs: device-run.sh closes the app itself, and attaches with the app
+# paused at its first instruction. LLDB_CMDS run right after the attach, so set
+# the breakpoints there and then continue, unless --pause.
+# lldb-dap (VS Code) looks up every library the app loads, and lldb reads any
+# library that isn't on disk out of the phone's memory, 512 bytes at a time:
+# minutes before a breakpoint can show. device-run.sh only extracts the Swift
+# runtime from the shared cache, so extract all of it, once per iOS build.
+full_symbols() {
+  local info sym dsc
+  info=$(timeout 30 "$PMD3" lockdown info 2>/dev/null) || return 0
+  sym="$HOME/.cache/omarchy-apple-dev/DeviceSupport/$(/usr/bin/python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+print(d["ProductVersion"] + " (" + d["BuildVersion"] + ")")' "$info")"
+  [ -f "$sym/Symbols/.all-extracted" ] && return 0
+  if [ ! -d "$sym/dsc" ]; then
+    echo "== Copying the shared cache from the iPhone (once per iOS build, a few GB)"
+    "$PMD3" developer fetch-symbols download "$sym/dsc" --userspace || {
+      echo "== Couldn't copy it yet (developer disk image not mounted?); the next ios-run-dev will."
+      return 0
+    }
+  fi
+  dsc=$(find "$sym/dsc" -name dyld_shared_cache_arm64e | head -n1)
+  [ -n "$dsc" ] || return 0
+  echo "== Extracting all system libraries for the debugger (once per iOS build, ~2 min, ~6 GB)"
+  rm -rf "$sym/Symbols.new"
+  if ! "$HOME/.local/bin/ipsw" dyld extract "$dsc" --all --slide -o "$sym/Symbols.new" >/dev/null 2>&1; then
+    rm -rf "$sym/Symbols.new"
+    echo "== Extraction failed; debugging still works, VS Code's debugger is just slow to stop."
+    return 0
+  fi
+  # The full set includes the Swift runtime that device-run.sh extracted.
+  rm -rf "$sym/Symbols"
+  mv "$sym/Symbols.new" "$sym/Symbols"
+  touch "$sym/Symbols/.all-extracted"
+}
+
+if [ "$debug" = 1 ]; then
+  full_symbols
+  # Ctrl+D (or quit) leaves lldb without the "Do you really want to proceed" prompt.
+  cmds=("settings set interpreter.prompt-on-quit false")
+  for b in "${breaks[@]}"; do
+    case "$b" in
+      *:[0-9]*) cmds+=("breakpoint set --file ${b%:*} --line ${b##*:}") ;;
+      *) cmds+=("breakpoint set --name $b") ;;
+    esac
+  done
+  [ "$pause" = 1 ] || cmds+=("continue")
+  # --serve: VS Code sets the breakpoints and continues, so nothing extra.
+  [ "$serve" = 1 ] && cmds=()
+  LLDB_CMDS="${LLDB_CMDS:+$LLDB_CMDS$'\n'}$(printf '%s\n' "${cmds[@]+"${cmds[@]}"}")"
+  export LLDB_CMDS
+
+  # For print() output: run a copy of device-run.sh whose pymobiledevice3 is
+  # the --pmd3-hook above, so the repo's file stays untouched.
+  hook=$(mktemp) dr=$(mktemp) IOS_RUN_STREAMS=$(mktemp)
+  export IOS_RUN_STREAMS
+  stop_streams() { xargs -r kill <"$IOS_RUN_STREAMS" 2>/dev/null || true; : >"$IOS_RUN_STREAMS"; }
+  trap 'stop_streams; rm -f "$hook" "$dr" "$IOS_RUN_STREAMS"' EXIT
+  printf '#!/bin/bash\nIOS_RUN_PMD3=%q exec %q --pmd3-hook "$@"\n' "$PMD3" "$(readlink -f "$0")" >"$hook"
+  chmod +x "$hook"
+  # Also lldb, for --serve: IOS_RUN_LLDB is the --lldb-serve stand-in then.
+  sed -e "s|^PMD3=.*|PMD3=$hook|" \
+    -e 's|exec lldb "${lcmds\[@\]}"|exec "${IOS_RUN_LLDB:-lldb}" "${lcmds[@]}"|' "$REPO/device-run.sh" >"$dr"
+  if grep -qx "PMD3=$hook" "$dr"; then
+    run=(bash "$dr")
+  else
+    echo "== device-run.sh no longer sets PMD3 on its own line; running it without print() output."
+    run=("$REPO/device-run.sh")
+  fi
+  exec 9>&1
+
+  if [ "$serve" = 1 ]; then
+    if ! grep -q 'exec "${IOS_RUN_LLDB:-lldb}"' "$dr"; then
+      echo "== device-run.sh no longer starts lldb the way ios-run expects; VS Code debugging can't work." >&2
+      exit 1
+    fi
+    # An earlier F5 that VS Code didn't stop.
+    [ -f "$serve_pid" ] && kill "$(cat "$serve_pid")" 2>/dev/null || true
+    mkdir -p xtool
+    serve_lldb=$(mktemp)
+    printf '#!/bin/bash\nexec %q --lldb-serve "$@"\n' "$(readlink -f "$0")" >"$serve_lldb"
+    chmod +x "$serve_lldb"
+    trap 'stop_streams; rm -f "$hook" "$dr" "$IOS_RUN_STREAMS" "$serve_lldb"' EXIT
+    : >"$serve_log"
+    IOS_RUN_LLDB=$serve_lldb IOS_RUN_SERVE_CMDS=$serve_cmds IOS_RUN_SERVE_PID=$serve_pid IOS_RUN_APP_LOG=$serve_log \
+      "${run[@]}" "${pass[@]}"
+    exit
+  fi
+
+  # Offer a rerun when lldb exits, also after a failed build (fix it, press Enter).
+  while true; do
+    "${run[@]}" "${pass[@]}" || true
+    stop_streams
+    echo
+    read -r -p "== Debug session ended. Enter = build and run again, q = stop: " ans || { echo; break; }
+    [ -z "$ans" ] || break
+  done
+  exit 0
+fi
+
+# The installed id carries xtool's team prefix (XTL-xxxx.<bundleID>).
+installed_bid() {
+  timeout 60 "$PMD3" apps list 2>/dev/null | /usr/bin/python3 -c '
+import json, sys
+b = sys.argv[1]
+print(next((k for k in json.load(sys.stdin) if k == b or k.endswith("." + b)), ""))' \
+    "$(awk '/^bundleID:/ {print $2}' xtool.yml)" || true
+}
+
+# Closing and launching both need the developer disk image. xtool dev run only
+# installs, and xtool launch uses the debug service iOS 17+ removed.
+ddi=0
+if timeout 30 "$PMD3" mounter list --userspace 2>/dev/null | grep -qi personalized; then
+  ddi=1
+  bid=$(installed_bid)
+  if [ -n "$bid" ]; then
+    echo "== Closing $bid on the phone"
+    timeout 30 "$PMD3" developer dvt pkill --bundle "$bid" --userspace >/dev/null 2>&1 || true
+  fi
+else
+  echo "== Can't close or launch the app automatically: the developer disk image isn't"
+  echo "   mounted (the phone restarted, or no ios-run-dev run yet). If the app is open, swipe"
+  echo "   home so the install can finish, then open it yourself. Run 'ios-run-dev'"
+  echo "   once to turn this back on."
+fi
+
+"$REPO/device-run.sh" "${pass[@]+"${pass[@]}"}"
+
+# --live: why this app can't hot reload yet, or nothing if it can.
+live_blocker() {
+  grep -q 'HotReload' Package.swift || { echo "Package.swift doesn't use the HotReload package"; return; }
+  grep -q -- '-interposable' Package.swift || { echo "Package.swift doesn't link with -interposable"; return; }
+  [ -f "$HOME/.config/omarchy-apple-dev/development/key.pem" ] || { echo "no development signing identity (docs: HOW-IT-WORKS.md, hot reload)"; return; }
+  command -v inotifywait >/dev/null || { echo "inotifywait isn't installed (inotify-tools)"; return; }
+}
+
+# --live: launch with the output in the background, then turn saves into swaps.
+live_run() {
+  local swap="$HOME/.local/share/ios-run/hot-reload/hot-swap.sh" known stream watch_pid rerun=0
+  # One live session per app: a second one (another terminal or VS Code
+  # window) would swap every save twice. The newest wins.
+  local lock="$PWD/xtool/ios-live.pid" other
+  other=$(cat "$lock" 2>/dev/null || true)
+  if [ -n "$other" ] && [ "$other" != $$ ] && kill -0 "$other" 2>/dev/null; then
+    echo "== Stopping the other live session for this app (pid $other)."
+    kill -TERM "$other" 2>/dev/null || true
+    sleep 1
+  fi
+  mkdir -p "$PWD/xtool"
+  echo $$ >"$lock"
+  echo "== Launching $bid live. Save a .swift file and it swaps into the running app."
+  echo "   New or deleted files and Package.swift changes rerun the app. Ctrl+C stops."
+  # The app's output also goes to a log, to check that each swap arrived.
+  local live_log="$PWD/xtool/ios-live-output.log" rerun_flag="$PWD/xtool/ios-live-rerun"
+  : >"$live_log"
+  rm -f "$rerun_flag"
+  PYTHONUNBUFFERED=1 "$PMD3" developer dvt launch "$bid" --env NSUnbufferedIO=YES --stream --userspace \
+    > >(grep --line-buffered -v '^Process launched with pid' | app_output | tee -a "$live_log") 2>&1 &
+  stream=$!
+  # Speed-ups for swaps (hot-swap.sh falls back without them):
+  # - the app target's own swiftc command, trimmed (swiftc-args.py --fast),
+  #   warmed up in the background: it's used once <args>.ready exists;
+  # - hot-push.py keeps a connection to the phone open for pushes.
+  local hr="$HOME/.local/share/ios-run/hot-reload" fast_args="$PWD/xtool/ios-live-fast.json"
+  local push_port="$PWD/xtool/ios-live-push.port" module warm_pid="" push_pid=""
+  module=$(/usr/bin/python3 -c 'import re, sys
+m = re.search(r"\.library\(\s*name:\s*\"[^\"]+\"\s*,\s*targets:\s*\[\"([^\"]+)\"", open("Package.swift").read())
+print(m.group(1) if m else "")')
+  rm -f "$fast_args" "$fast_args.ready" "$push_port"
+  if [ -n "$module" ] && /usr/bin/python3 "$hr/swiftc-args.py" --fast "$PWD/.build/hot-reload/objects" "$PWD" "$module" >"$fast_args" 2>/dev/null; then
+    ( /usr/bin/python3 -c 'import json, subprocess, sys
+a = json.load(open(sys.argv[1]))
+sys.exit(subprocess.run(a[1:], cwd=a[0], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode)' "$fast_args" &&
+        touch "$fast_args.ready" ) &
+    warm_pid=$!
+  else
+    rm -f "$fast_args"
+  fi
+  "$HOME/pymobile3-venv/bin/python" "$hr/hot-push.py" "$bid" "$push_port" >"$PWD/xtool/ios-live-push.log" 2>&1 &
+  push_pid=$!
+  export HOT_SWAP_FAST_ARGS="$fast_args" HOT_SWAP_PUSH_PORT_FILE="$push_port"
+
+  coproc WATCH { exec inotifywait -q -m -r -e close_write,moved_to,create,delete --format '%e|%w%f' Sources Package.swift xtool.yml 2>/dev/null; }
+  watch_pid=$WATCH_PID
+  trap 'kill "$stream" "$watch_pid" $push_pid $warm_pid 2>/dev/null; [ "$(cat "$lock" 2>/dev/null)" = $$ ] && rm -f "$lock"; echo; exit 0' INT TERM
+  known=$(find Sources -name '*.swift' | sort)
+  while true; do
+    if [ -f "$rerun_flag" ]; then
+      rm -f "$rerun_flag"
+      echo "== The app refused that swap (a returned view type changed). Running the app again."
+      rerun=2
+    elif ! kill -0 "$stream" 2>/dev/null; then
+      echo "== The app stopped (closed, or crashed after a swap). Running it again."
+      rerun=1
+    elif ! kill -0 "$watch_pid" 2>/dev/null; then
+      echo "== The file watcher stopped; live mode can't continue." >&2
+      kill "$stream" $push_pid $warm_pid 2>/dev/null
+      exit 1
+    else
+      local ev path changed=()
+      IFS='|' read -r -t 1 ev path <&"${WATCH[0]}" || continue
+      # Editors often write a file in several steps: gather what arrives
+      # in the next 0.15 s as one save.
+      while :; do
+        case "$path" in
+          Package.swift | xtool.yml) rerun=1 ;;
+          *.swift)
+            if [[ "$ev" == *DELETE* ]] || ! grep -qxF "$path" <<<"$known"; then
+              rerun=1
+            elif [[ " ${changed[*]-} " != *" $path "* ]]; then
+              changed+=("$path")
+            fi ;;
+        esac
+        IFS='|' read -r -t 0.15 ev path <&"${WATCH[0]}" || break
+      done
+      if [ "$rerun" = 0 ] && [ "${#changed[@]}" -gt 0 ]; then
+        echo "== Swapping ${changed[*]##*/}"
+        rc=0
+        out=$(HOT_SWAP_BID=$bid "$swap" "${changed[@]}" 2>&1) || rc=$?
+        if [ "$rc" = 0 ]; then
+          echo "== ${out##*$'\n'}"
+          # iOS suspends an app that's in the background or behind the lock
+          # screen; it then loads the swap only when it's open again.
+          local dylib
+          dylib=$(grep -o 'hot-[0-9]*\.dylib' <<<"$out" | tail -n1)
+          if [ -n "$dylib" ]; then
+            ( for _ in 1 2 3 4 5 6 7 8 9 10; do
+                sleep 0.5
+                if grep -q "SWAP REFUSED $dylib" "$live_log"; then
+                  # The app refused it (a `some View` type changed): rerun.
+                  touch "$rerun_flag"
+                  exit 0
+                fi
+                grep -q "swapped $dylib\|$dylib: couldn't load" "$live_log" && exit 0
+              done
+              echo "== The app hasn't picked up $dylib yet. Is it open on the unlocked phone? It loads the swap as soon as it's in front."
+            ) &
+          fi
+          continue
+        elif [ "$rc" = 3 ]; then
+          # Builds, but can't be swapped into the running app.
+          printf '%s\n' "$out" | sed 's/^/   /'
+          echo "== Running the app again to pick this change up."
+          rerun=2
+        else
+          printf '%s\n' "$out" | sed 's/^/   /'
+          echo "== Not swapped: the app keeps running the previous code. Fix it and save again."
+          continue
+        fi
+      fi
+      [ "$rerun" = 1 ] && echo "== Files were added or removed, or the package changed: running the app again."
+    fi
+    if [ "$rerun" != 0 ]; then
+      kill "$stream" "$watch_pid" $push_pid $warm_pid 2>/dev/null || true
+      exec "$0" "${orig_args[@]}"
+    fi
+  done
+}
+
+if [ "$ddi" = 1 ]; then
+  # A first install had no id to look up before.
+  [ -n "${bid:-}" ] || bid=$(installed_bid)
+  if [ -z "$bid" ]; then
+    echo "== Installed, but couldn't find it to launch; open it on the phone."
+    exit 0
+  fi
+  if [ "$live" != 0 ]; then
+    blocker=$(live_blocker)
+    if [ -z "$blocker" ]; then
+      live_run
+      exit 0
+    fi
+    # --auto-live: an app that isn't set up for hot reload just runs normally.
+    if [ "$live" = 1 ] || [[ "$blocker" != "Package.swift doesn't use"* ]]; then
+      echo "== Can't run live: $blocker. Running normally instead."
+    fi
+  fi
+  # --stream relays the app's stdout until Ctrl+C; NSUnbufferedIO=YES (as Xcode
+  # sets it) makes each print() arrive right away instead of in batches.
+  echo "== Launching $bid. Its print() output follows; Ctrl+C stops watching."
+  trap 'echo; exit 0' INT
+  PYTHONUNBUFFERED=1 "$PMD3" developer dvt launch "$bid" --env NSUnbufferedIO=YES --stream --userspace 2>&1 |
+    grep --line-buffered -v '^Process launched with pid' | app_output ||
+    echo "== Installed, but couldn't launch it; open it on the phone."
+fi
+[ "$live" = 1 ] && [ "$ddi" = 0 ] && echo "== --live needs the developer disk image too (see above)."
+exit 0

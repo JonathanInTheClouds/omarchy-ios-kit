@@ -1,0 +1,89 @@
+{
+  // iPhone runs through ~/.local/bin/ios-run (see ios-run --help).
+  // Full paths, because VS Code started from the app launcher may not have
+  // ~/.local/bin on its PATH.
+  // problemMatcher: compiler errors to the Problems tab. Not $swiftc: the
+  // build output has colour codes and a leading \r that it doesn't expect.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      // SUPER+R, F6 or Ctrl+Shift+B: close the app, build, install, open it, show
+      // its print()s; in hot reload apps, saves then swap in live.
+      // Ctrl+C in the terminal stops watching; the app keeps running.
+      "label": "Run on iPhone",
+      "type": "process",
+      "command": "${userHome}/.local/bin/ios-run",
+      // Live (hot reload) in apps set up for it, a normal run otherwise.
+      "args": ["--auto-live"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": {"owner": "swift", "source": "swiftc", "fileLocation": "absolute", "pattern": {"regexp": "^[^/]*(/[^:\\r\\u001b]+\\.swift):(\\d+):(\\d+):\\s+(?:\\u001b\\[[0-9;]*m)*(error|warning):\\s+(?:\\u001b\\[[0-9;]*m)*(.*?)(?:\\u001b\\[[0-9;]*m)*\\r?$", "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5}},
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true, "focus": false },
+      // Running it again while the last run still shows output replaces that run.
+      "runOptions": { "instanceLimit": 1, "instancePolicy": "terminateOldest" }
+    },
+    {
+      // Run, then swap every saved .swift file into the running app (hot
+      // reload). New files or Package.swift changes rerun it. Needs the
+      // HotReload package (new-ios-app sets it up). Ctrl+C in the terminal stops.
+      "label": "Run on iPhone (live)",
+      "type": "process",
+      "command": "${userHome}/.local/bin/ios-run",
+      "args": ["--live"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": {"owner": "swift", "source": "swiftc", "fileLocation": "absolute", "pattern": {"regexp": "^[^/]*(/[^:\\r\\u001b]+\\.swift):(\\d+):(\\d+):\\s+(?:\\u001b\\[[0-9;]*m)*(error|warning):\\s+(?:\\u001b\\[[0-9;]*m)*(.*?)(?:\\u001b\\[[0-9;]*m)*\\r?$", "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5}},
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true, "focus": false },
+      "runOptions": { "instanceLimit": 1, "instancePolicy": "terminateOldest" }
+    },
+    {
+      // Debug run in lldb, in the terminal panel. Ctrl+C pauses, Ctrl+D leaves
+      // lldb, then Enter in the same terminal reruns.
+      "label": "Debug on iPhone (lldb)",
+      "type": "process",
+      "command": "${userHome}/.local/bin/ios-run-dev",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": {"owner": "swift", "source": "swiftc", "fileLocation": "absolute", "pattern": {"regexp": "^[^/]*(/[^:\\r\\u001b]+\\.swift):(\\d+):(\\d+):\\s+(?:\\u001b\\[[0-9;]*m)*(error|warning):\\s+(?:\\u001b\\[[0-9;]*m)*(.*?)(?:\\u001b\\[[0-9;]*m)*\\r?$", "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5}},
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true, "focus": true },
+      "runOptions": { "instanceLimit": 1, "instancePolicy": "terminateOldest" }
+    },
+    {
+      // Debug run that stops at the line the cursor is on.
+      "label": "Debug on iPhone, stop at this line",
+      "type": "process",
+      "command": "${userHome}/.local/bin/ios-run-dev",
+      "args": ["-b", "${fileBasename}:${lineNumber}"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": {"owner": "swift", "source": "swiftc", "fileLocation": "absolute", "pattern": {"regexp": "^[^/]*(/[^:\\r\\u001b]+\\.swift):(\\d+):(\\d+):\\s+(?:\\u001b\\[[0-9;]*m)*(error|warning):\\s+(?:\\u001b\\[[0-9;]*m)*(.*?)(?:\\u001b\\[[0-9;]*m)*\\r?$", "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5}},
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true, "focus": true },
+      "runOptions": { "instanceLimit": 1, "instancePolicy": "terminateOldest" }
+    },
+    {
+      // F5's first half (launch.json): get the app ready for VS Code's
+      // debugger, then keep showing its print()s until the debug session ends.
+      "label": "Prepare iPhone debug",
+      "type": "process",
+      "command": "${userHome}/.local/bin/ios-run-dev",
+      "args": ["--serve"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": {"owner": "swift", "source": "swiftc", "fileLocation": "absolute", "pattern": {"regexp": "^[^/]*(/[^:\\r\\u001b]+\\.swift):(\\d+):(\\d+):\\s+(?:\\u001b\\[[0-9;]*m)*(error|warning):\\s+(?:\\u001b\\[[0-9;]*m)*(.*?)(?:\\u001b\\[[0-9;]*m)*\\r?$", "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5},
+        "background": { "activeBegin": true, "beginsPattern": "^== 1\\. Device visible", "endsPattern": "^== Ready for the debugger" }},
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true, "focus": false },
+      "hide": true
+    },
+    {
+      // F5's end (launch.json postDebugTask): end the "Prepare iPhone debug" run.
+      "label": "Stop iPhone debug",
+      "type": "process",
+      "command": "${userHome}/.local/bin/ios-run-dev",
+      "args": ["--stop"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "never" },
+      "hide": true
+    }
+  ]
+}

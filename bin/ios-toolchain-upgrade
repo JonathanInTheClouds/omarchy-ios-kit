@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Status, root patches and upgrades for the iOS-on-Linux toolchain
+# (omarchy-apple-dev, xtool, AUR swift-bin held by IgnorePkg).
+#
+#   ios-toolchain-upgrade            status: versions, Xcode match, patches, SDK
+#   ios-toolchain-upgrade --patch    re-apply the root-only xcspec patches
+#   ios-toolchain-upgrade --upgrade  upgrade swift-bin and re-register the SDK
+#
+# A major Swift bump (6.4 -> 6.5) needs the matching Xcode first:
+#   XCODE_XIP=/path/to/Xcode_NN.xip ios-toolchain-upgrade --upgrade
+set -euo pipefail
+
+# Settings written by the kit's install.sh (~/.config/ios-run/config).
+IOS_RUN_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/ios-run/config"
+# shellcheck source=/dev/null
+[ -f "$IOS_RUN_CONFIG" ] && . "$IOS_RUN_CONFIG"
+REPO="${APPLE_DEV_REPO:-$HOME/Tools/omarchy-apple-dev}"
+XCODE_DIR="${XCODE_DIR:-$HOME/Downloads}"
+PM=/usr/lib/swift/usr/share/pm
+
+# file:setting:value. swift-bin owns these files, so every reinstall or
+# upgrade resets them. install-toolchain.sh can only warn (FINDINGS.md 24).
+PATCHES=(
+  "$PM/SwiftBuild_SWBUniversalPlatform.bundle/CopyStringsFile.xcspec:STRINGS_FILE_INPUT_ENCODING:utf-8"
+  "$PM/SwiftBuild_SWBCore.bundle/CoreBuildSystem.xcspec:STRINGS_FILE_OUTPUT_ENCODING:binary"
+  "$PM/SwiftBuild_SWBCore.bundle/NativeBuildSystem.xcspec:STRINGS_FILE_OUTPUT_ENCODING:binary"
+)
+
+# Same edit as install-toolchain.sh: the first DefaultValue within 12 lines
+# after the setting's Name. $1 = "check" (exit 1 if any unpatched) or "apply".
+patch_xcspecs() {
+  /usr/bin/python3 - "$1" "${PATCHES[@]}" <<'PY'
+import re, sys
+mode, specs = sys.argv[1], sys.argv[2:]
+unpatched = 0
+for spec in specs:
+    path, setting, value = spec.rsplit(":", 2)
+    try:
+        lines = open(path).read().split("\n")
+    except FileNotFoundError:
+        print(f"  missing: {path}"); unpatched += 1; continue
+    old = "\n".join(lines)
+    for i, line in enumerate(lines):
+        if f'Name = "{setting}";' in line or f'Name = {setting};' in line:
+            for j in range(i + 1, min(i + 12, len(lines))):
+                if "DefaultValue =" in lines[j]:
+                    lines[j] = re.sub(r'"[^"]*"\s*;', f'"{value}";', lines[j])
+                    break
+    new = "\n".join(lines)
+    name = path.split("/")[-1]
+    if new == old:
+        print(f"  ok       {name} {setting}={value}")
+    elif mode == "apply":
+        open(path, "w").write(new)
+        print(f"  patched  {name} {setting}={value}")
+    else:
+        print(f"  NEEDED   {name} {setting}={value}")
+        unpatched += 1
+sys.exit(1 if unpatched else 0)
+PY
+}
+
+# Xcode major whose Swift matches (README / FINDINGS.md 16, 22).
+xcode_for() {
+  case "$1" in
+    6.4) echo 27 ;;
+    6.3) echo 26 ;;
+    *) echo "?" ;;
+  esac
+}
+
+versions() {
+  installed=$(pacman -Q swift-bin | awk '{print $2}')
+  available=$(yay -Si swift-bin 2>/dev/null | awk -F': *' '/^Version/ {print $2}')
+}
+mm() { echo "$1" | grep -oE '^[0-9]+\.[0-9]+'; }
+
+status() {
+  echo "swift-bin installed: $installed (Swift $(mm "$installed") -> Xcode $(xcode_for "$(mm "$installed")"))"
+  echo "swift-bin on AUR:    ${available:-unknown}"
+  if [ -z "$available" ] || [ "$available" = "$installed" ]; then
+    echo "  up to date"
+  elif [ "$(mm "$available")" = "$(mm "$installed")" ]; then
+    echo "  minor update: run  ios-toolchain-upgrade --upgrade"
+  else
+    echo "  MAJOR update (Swift $(mm "$available")): needs Xcode $(xcode_for "$(mm "$available")") first."
+    echo "  1. cd $REPO && git pull   (check the README supports Swift $(mm "$available"))"
+    echo "  2. download that Xcode .xip (developer.apple.com/download) to $XCODE_DIR/"
+    echo "  3. XCODE_XIP=$XCODE_DIR/<file>.xip ios-toolchain-upgrade --upgrade"
+  fi
+  echo "xcspec patches:"
+  patch_xcspecs check || echo "  run: ios-toolchain-upgrade --patch"
+  echo -n "darwin SDK: "
+  swift sdk list 2>/dev/null | grep -qx darwin && echo registered || echo "MISSING (run: $REPO/install-toolchain.sh --repair)"
+}
+
+case "${1:-}" in
+  "")
+    versions
+    status
+    ;;
+  --patch)
+    patch_xcspecs check >/dev/null || sudo "$0" --apply-as-root
+    patch_xcspecs check
+    ;;
+  --apply-as-root)
+    [ "$(id -u)" = 0 ] || { echo "use --patch" >&2; exit 2; }
+    patch_xcspecs apply >/dev/null
+    ;;
+  --upgrade)
+    versions
+    if [ -z "$available" ] || [ "$available" = "$installed" ]; then
+      echo "swift-bin $installed is already the AUR version; re-checking patches and SDK."
+      "$0" --patch
+      status
+      exit 0
+    fi
+    major=0
+    [ "$(mm "$available")" != "$(mm "$installed")" ] && major=1
+    if [ "$major" = 1 ] && [ ! -f "${XCODE_XIP:-}" ]; then
+      echo "Swift $(mm "$installed") -> $(mm "$available") is a major update; it needs Xcode $(xcode_for "$(mm "$available")")."
+      echo "Set XCODE_XIP to the downloaded .xip and re-run. Nothing was changed."
+      exit 1
+    fi
+    echo "== Upgrading swift-bin $installed -> $available (it is in IgnorePkg; confirm when asked)"
+    yay -S swift-bin
+    if [ "$major" = 1 ]; then
+      # A full run skips SDK registration while any darwin SDK is registered,
+      # so drop the old one to make it build the new Xcode's SDK.
+      echo "== Replacing the darwin SDK with Xcode from $XCODE_XIP"
+      swift sdk remove darwin
+      # /usr/bin first: the full run re-creates ~/pymobile3-venv with the
+      # first python3 on PATH, and it must stay on system Python, not mise's.
+      (cd "$REPO" && PATH="/usr/bin:$PATH" XCODE_XIP="$XCODE_XIP" ./install-toolchain.sh)
+    else
+      echo "== Re-registering the cached SDK"
+      (cd "$REPO" && ./install-toolchain.sh --repair)
+    fi
+    "$0" --patch
+    echo "== Result"
+    versions
+    status
+    ;;
+  *)
+    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac

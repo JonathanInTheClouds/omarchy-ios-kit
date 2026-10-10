@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Create a new iOS app with xtool, ready for VS Code (Ctrl+Shift+B or F6 runs
+# it, F5 debugs it), for coding agents (AGENTS.md) and committed to a new git
+# repo.
+#
+#   new-ios-app MyNewApp                       <APPS_DIR>/MyNewApp, bundle ID
+#                                              <BUNDLE_PREFIX>.MyNewApp (both
+#                                              from ~/.config/ios-run/config)
+#   new-ios-app MyNewApp --prefix com.acme     bundle ID com.acme.MyNewApp
+#   new-ios-app MyNewApp --dir ~/somewhere     create it in ~/somewhere/MyNewApp
+#   new-ios-app MyNewApp --no-live             without hot reload (ios-run --live)
+#
+# New apps are set up for hot reload: the HotReload package, the debug-only
+# -interposable link flag and a ContentView that updates live.
+# The .vscode files come from ~/.local/share/ios-run/vscode/; edit those to
+# change what new apps get.
+set -euo pipefail
+
+# Settings written by the kit's install.sh (~/.config/ios-run/config).
+IOS_RUN_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/ios-run/config"
+# shellcheck source=/dev/null
+[ -f "$IOS_RUN_CONFIG" ] && . "$IOS_RUN_CONFIG"
+PREFIX="${BUNDLE_PREFIX:-}"
+PARENT="${APPS_DIR:-$HOME/Projects/ios}"
+TEMPLATES="$HOME/.local/share/ios-run/vscode"
+XT="$HOME/.local/bin/xtool"
+
+usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+name="" live=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help) usage ;;
+    --prefix) PREFIX="${2:?--prefix needs a value, like com.acme}"; shift 2 ;;
+    --dir) PARENT="${2:?--dir needs a folder}"; shift 2 ;;
+    --no-live) live=0; shift ;;
+    -*) echo "Unknown option: $1" >&2; usage 2 ;;
+    *) [ -z "$name" ] || { echo "Only one app name, please." >&2; exit 2; }; name=$1; shift ;;
+  esac
+done
+[ -n "$name" ] || usage 2
+
+# The name becomes a Swift type (MyNewAppApp) and the end of the bundle ID, so
+# letters and digits only, starting with a letter.
+if ! [[ "$name" =~ ^[A-Za-z][A-Za-z0-9]*$ ]]; then
+  echo "App name must be letters and digits, starting with a letter (got '$name')." >&2
+  exit 2
+fi
+if ! [[ "$PREFIX" =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]]; then
+  echo "Prefix must look like a reverse domain, e.g. com.acme (got '$PREFIX')." >&2
+  exit 2
+fi
+dir="$PARENT/$name"
+if [ -e "$dir" ]; then
+  echo "$dir already exists." >&2
+  exit 1
+fi
+for f in tasks.json launch.json settings.json; do
+  [ -f "$TEMPLATES/$f" ] || { echo "Missing template $TEMPLATES/$f" >&2; exit 1; }
+done
+[ -f "$HOME/.local/share/ios-run/templates/AGENTS.md" ] || { echo "Missing template ~/.local/share/ios-run/templates/AGENTS.md" >&2; exit 1; }
+if [ -z "$PREFIX" ]; then
+  echo "No bundle ID prefix: set BUNDLE_PREFIX in $IOS_RUN_CONFIG (install.sh asks for it) or pass --prefix com.yourname." >&2
+  exit 2
+fi
+
+mkdir -p "$PARENT"
+echo "== Creating $dir"
+(cd "$PARENT" && "$XT" new "$name" --skip-setup </dev/null)
+
+cd "$dir"
+sed -i "s|^bundleID: .*|bundleID: $PREFIX.$name|" xtool.yml
+grep -qx "bundleID: $PREFIX.$name" xtool.yml || { echo "Couldn't set the bundle ID in xtool.yml" >&2; exit 1; }
+
+if [ "$live" = 1 ]; then
+  /usr/bin/python3 "$HOME/.local/share/ios-run/hot-reload/enable-in-package.py" Package.swift >/dev/null
+  # xtool's starter view, plus the two lines that make a view update live.
+  cat >"Sources/$name/ContentView.swift" <<'EOF'
+import SwiftUI
+import HotReload
+
+struct ContentView: View {
+    // Hot reload: re-run this view's body after each live swap.
+    @ObserveHotReload private var hotReload
+
+    var body: some View {
+        VStack {
+            Image(systemName: "globe")
+                .imageScale(.large)
+                .foregroundStyle(.tint)
+            Text("Hello, world!")
+        }
+        .padding()
+        // Hot reload: keeps body's type fixed across edits (debug builds only).
+        .hotReloadable()
+    }
+}
+EOF
+fi
+
+mkdir -p .vscode
+cp "$TEMPLATES"/{tasks,launch,settings}.json .vscode/
+
+# Instructions for coding agents working in this app: AGENTS.md is the shared
+# convention (Codex, Cursor, Copilot, Gemini CLI, ...). Claude Code reads
+# CLAUDE.md, which just imports AGENTS.md, so every agent gets the same rules.
+# --no-live drops the hot reload part.
+agents_md="$HOME/.local/share/ios-run/templates/AGENTS.md"
+if [ "$live" = 1 ]; then
+  sed '/^<!-- \/\?hot-reload -->$/d' "$agents_md" >AGENTS.md
+else
+  sed '/^<!-- hot-reload -->$/,/^<!-- \/hot-reload -->$/d' "$agents_md" >AGENTS.md
+fi
+printf '@AGENTS.md\n' >CLAUDE.md
+
+cat >>.gitignore <<'EOF'
+
+# Added by new-ios-app
+# Signing material and secrets: never commit these.
+*.p8
+*.p12
+*.cer
+*.mobileprovision
+.env
+.env.*
+# Build output and editor/tool caches.
+/.swiftpm/
+/.sourcekit-lsp/
+*.ipa
+*.xip
+*.dSYM/
+# Editors and OS clutter.
+.idea/
+*.swp
+*~
+EOF
+
+git init -q
+git add -A
+git commit -q -m "New app $name from xtool new
+
+Bundle ID $PREFIX.$name, VS Code tasks and launch config and AGENTS.md from new-ios-app."
+
+echo "== Ready: $dir"
+echo "   Bundle ID: $PREFIX.$name"
+echo "   Open it:   code $dir"
+echo "   Then F6 or Ctrl+Shift+B to run it on the iPhone, F5 to debug it"
+echo "   (SUPER+R / SUPER+SHIFT+R with the kit's optional Omarchy keys)."
+[ "$live" = 1 ] && echo "   Live: ios-run --live (or the \"Run on iPhone (live)\" task) swaps each save in."
+true

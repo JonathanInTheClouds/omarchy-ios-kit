@@ -1,0 +1,19 @@
+{
+  // F5: debug on the iPhone with VS Code's debugger (lldb-dap).
+  // "Prepare iPhone debug" (ios-run-dev --serve) builds, installs, starts the
+  // app paused and writes xtool/ios-debug.py; the attach runs that file, then
+  // VS Code sets your breakpoints and lets the app run. The app's print()
+  // output shows in the Debug Console (and the "Prepare iPhone debug" tab).
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug on iPhone",
+      "type": "lldb-dap",
+      "request": "attach",
+      "attachCommands": ["script exec(open('${workspaceFolder}/xtool/ios-debug.py').read())"],
+      "preLaunchTask": "Prepare iPhone debug",
+      "postDebugTask": "Stop iPhone debug",
+      "timeout": 60
+    }
+  ]
+}

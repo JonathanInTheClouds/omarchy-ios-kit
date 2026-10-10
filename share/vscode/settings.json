@@ -1,0 +1,8 @@
+{
+  // The lldb-dap that comes with the Swift toolchain: it understands Swift.
+  "lldb-dap.executable-path": "/usr/lib/swift/usr/bin/lldb-dap",
+  // Marks this as an iOS project for the run/debug shortcuts in
+  // ~/.config/Code/User/keybindings.json (SUPER+R / F6 run, SUPER+SHIFT+R
+  // debug). VS Code may grey it out as an unknown setting; that's expected.
+  "iosRun.project": true
+}
