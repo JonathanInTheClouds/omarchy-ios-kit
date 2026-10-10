@@ -224,10 +224,10 @@ chmod 600 ~/.config/xtool/data/*
 
 ---
 
-## 4. Install the kit
+## 4. Install the kit (this repo)
 
 ```sh
-git clone <this repository> ~/Tools/omarchy-ios-kit
+git clone https://github.com/JonathanInTheClouds/omarchy-ios-kit.git ~/Tools/omarchy-ios-kit
 cd ~/Tools/omarchy-ios-kit
 ./install.sh
 ```
