@@ -168,16 +168,45 @@ PATH="/usr/bin:$PATH" XCODE_XIP=~/Downloads/Xcode_27.xip ./install-toolchain.sh 
 
 ### 3.6 Sign in to Apple
 
-```sh
-xtool auth
-```
+xtool needs to sign in to your Apple account once, to create the development
+certificate and provisioning profiles it signs apps with. It offers two ways;
+pick one.
 
-Choose an App Store Connect **API key** (paid accounts: create one under
-App Store Connect → Users and Access → Integrations, download the `.p8`, note
-the Key ID and Issuer ID) or your Apple ID. Keep the `.p8` somewhere private,
-e.g. `~/.appstoreconnect/private_keys/` with `chmod 600`.
+**Option A: an App Store Connect API key** (needs the paid Apple Developer
+Program; this is what the kit was tested with, and the same key works for
+TestFlight uploads later):
 
-xtool stores its token in `~/.config/xtool/data/` and may create it readable
+1. Go to [App Store Connect](https://appstoreconnect.apple.com) → **Users and
+   Access** → **Integrations** → **App Store Connect API**. Under **Team
+   Keys**, click **+** (the account holder may first have to request API
+   access there).
+2. Give the key a name and a role. Choose **Admin**: that's the simple choice
+   that can create certificates and profiles.
+3. **Download the key: a file named `AuthKey_<KEY ID>.p8`.** Apple lets you
+   download it **only once**, so keep it safe; if it's lost, revoke it and
+   make a new one.
+4. Note the two IDs shown on that page: the **Key ID** (next to the key) and
+   the **Issuer ID** (at the top of the keys list).
+5. Store the key privately:
+   ```sh
+   mkdir -p ~/.appstoreconnect/private_keys
+   mv ~/Downloads/AuthKey_*.p8 ~/.appstoreconnect/private_keys/
+   chmod 700 ~/.appstoreconnect ~/.appstoreconnect/private_keys
+   chmod 600 ~/.appstoreconnect/private_keys/AuthKey_*.p8
+   ```
+6. Run `xtool auth`, choose the **API key** option, and give it the Issuer ID,
+   the Key ID and the path to the `.p8` file.
+
+**Option B: your Apple ID** (works with a free account too):
+
+1. Run `xtool auth` and choose the **Apple ID** option.
+2. Enter your Apple ID email and password, then the two-factor code Apple
+   sends to your devices.
+
+With a free account, apps installed this way expire after 7 days and Apple
+limits how many you can have; the kit hasn't been tested on this path.
+
+**Either way,** xtool stores its token in `~/.config/xtool/data/` and may create it readable
 by others; tighten it:
 
 ```sh
